@@ -1,0 +1,2 @@
+*.ckpt filter=lfs diff=lfs merge=lfs -text
+dataset/tiny_stories/train.txt filter=lfs diff=lfs merge=lfs -text
