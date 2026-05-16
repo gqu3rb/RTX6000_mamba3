@@ -1,0 +1,60 @@
+llm:
+  vocab_size : 50258
+  num_layers : 2
+  d_input    : 32
+  d_model    : 32
+  d_state    : 8
+  d_discr    : 128    
+  ker_size   : 4       
+  parallel   : true
+  max_len    : 64
+# llm:
+#   vocab_size : 50258    
+#   num_layers : 1        
+#   d_input    : 32
+#   d_model    : 16
+#   expand     : 2        
+#   headdim    : 16       
+#   d_state    : 8        
+#   d_discr    : 128      
+#   ker_size   : 4        
+#   parallel   : true
+#   max_len    : 64      
+#   # Parameters relevant for the model inference
+  prompt:
+    - Once upon a time
+    - In a galaxy far far away
+  token_lim : 512
+  use_top_k : 50
+  temperature : 1.
+
+tokenizer:
+  name: openai-community/gpt2 #GPT2TokenizerFast
+  special_tokens:
+    pad_token: <|pad|>
+
+dataset:
+  root: /home/ZhongLongYou/workspace/mamba-main/dataset/tiny_stories # The dataset
+  # read_chunk: 1024
+  num_workers: 16
+
+misc:
+  resume    : null
+
+train:
+  max_epochs : 100
+  accelerator: gpu
+  devices : auto
+  strategy: ddp_find_unused_parameters_false
+  precision: "16-mixed"
+  log_every_n_steps: 1
+  batch_size : 16
+
+logger:   # <---  log to logger
+  save_dir: /home/ZhongLongYou/workspace/mamba-main/logs # TensorBoardLogger "save_dir" not "log_dir"
+  name: llm-mamba
+  version: null
+
+ckpt:
+  monitor: train_loss
+  save_last: true

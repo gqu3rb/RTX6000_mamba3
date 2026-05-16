@@ -387,16 +387,16 @@ def mamba3_siso_combined(
     all_states_absent = (Input_SSM_State is None) and (Input_K_State is None) and (Input_V_State is None) and (Input_Angle_State is None)
     assert all_states_present or all_states_absent, "Input states must be provided together or all be None."
 
-    # Typecast all derived tensors to bf16.
+    # Typecast all derived tensors to float16.
     # ADT, DT should be in fp32 for stability
     # Q_bias, K_bias, D should be in fp32 as they are model parameters
-    Q = Q.to(torch.bfloat16)
-    K = K.to(torch.bfloat16)
-    V = V.to(torch.bfloat16)
-    Trap = Trap.to(torch.bfloat16)
-    Angles = Angles.to(torch.bfloat16)
+    Q = Q.to(torch.float16)
+    K = K.to(torch.float16)
+    V = V.to(torch.float16)
+    Trap = Trap.to(torch.float16)
+    Angles = Angles.to(torch.float16)
     if Z is not None:
-        Z = Z.to(torch.bfloat16)
+        Z = Z.to(torch.float16)
 
     return _Mamba3Function.apply(
         Q, K, V, ADT, DT, Trap, Q_bias, K_bias, Angles, D, Z,

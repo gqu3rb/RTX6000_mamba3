@@ -1,0 +1,15 @@
+d_discr: 128
+d_input: 768
+d_model: 768
+d_state: 16
+ker_size: 4
+max_len: 512
+num_layers: 24
+parallel: true
+prompt:
+- Once upon a time
+- In a galaxy far far away
+temperature: 1.0
+token_lim: 512
+use_top_k: 50
+vocab_size: 50258

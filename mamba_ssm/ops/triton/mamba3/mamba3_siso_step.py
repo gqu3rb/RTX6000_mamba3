@@ -204,7 +204,7 @@ def mamba3_siso_step_kernel(
         + offs_qk[None, :] * stride_output_ssm_state_qkdim, ssm_state)
 
     # Compute output
-    out = tl.dot(ssm_state.to(tl.bfloat16), q_block.reshape([HEADDIM_QK, 1]).to(tl.bfloat16)) # (HEADDIM_V, 1)
+    out = tl.dot(ssm_state.to(tl.float16), q_block.reshape([HEADDIM_QK, 1]).to(tl.float16)) # (HEADDIM_V, 1)
     out = out.reshape([HEADDIM_V]).to(tl.float32)
 
     # out = tl.sum(ssm_state * q_block[None, :], axis=1)  # (HEADDIM_V,)

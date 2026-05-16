@@ -1,7 +1,7 @@
 # Copyright (c) 2025, Tri Dao.
 # We need a pretty recent version of triton to support tuples. 3.3 definitely will work,
 # idk which is the minimum version.
-
+from __future__ import annotations
 import math
 from typing import Optional, Tuple
 
@@ -329,7 +329,7 @@ def test_correctness_qk_inference():
 
     device = "cuda"
     torch.manual_seed(2025)
-    dtype_qk = torch.bfloat16  # common inference dtype
+    dtype_qk = torch.float16  # common inference dtype
     dtype_ang = torch.float32
 
     def run_case(B, R, N, D, RD, with_bias, conjugate, expanded_heads, rotate_pairwise):

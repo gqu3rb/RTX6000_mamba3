@@ -21,7 +21,7 @@ from mamba_ssm.ops.triton.mamba3.utils import cos_approx, sin_approx, sigmoid_ap
 
 @triton.autotune(
     configs=[
-        triton.Config({"CHUNK_SIZE": cs}, num_stages=s, num_warps=w, maxnreg=r)
+        triton.Config({"CHUNK_SIZE": cs}, num_stages=s, num_warps=w)
         for cs in [32, 64]
         for s in [1, 2, 3]
         for w in [2, 4, 8]
@@ -193,7 +193,7 @@ def compute_dzdo(
 
 @triton.autotune(
     configs=[
-        triton.Config({}, num_stages=s, num_warps=w, maxnreg=r)
+        triton.Config({}, num_stages=s, num_warps=w)
         for s in [1, 2, 3]
         for w in [2, 4, 8]
         for r in [None, 128, 256]
@@ -811,7 +811,7 @@ def compute_dqkv(
 
 @triton.autotune(
     configs=[
-        triton.Config({}, num_stages=s, num_warps=w, maxnreg=r)
+        triton.Config({}, num_stages=s, num_warps=w)
         for s in [1, 2, 3]
         for w in [2, 4, 8]
         for r in [None, 128, 256]
@@ -1418,7 +1418,7 @@ def apply_dk_state_post(
 # =============================================================================
 @triton.autotune(
     configs=[
-        triton.Config({"CHUNK_SIZE": cs}, num_stages=s, num_warps=w, maxnreg=r)
+        triton.Config({"CHUNK_SIZE": cs}, num_stages=s, num_warps=w)
         for cs in [64, 128, 256]
         for s in [1, 2, 3]
         for w in [2, 4, 8]
@@ -1785,5 +1785,5 @@ def _alloc_fn(size: int, alignment: int, stream: Optional[int]):
     return torch.empty(size, device="cuda", dtype=torch.int8)
 
 
-triton.set_allocator(_alloc_fn)
+# triton.set_allocator(_alloc_fn)
 

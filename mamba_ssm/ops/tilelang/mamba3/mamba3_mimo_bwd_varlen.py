@@ -71,7 +71,6 @@ def mamba_mimo_bwd_fwd(
     hasD,
     reduceO,
     NS: int = 1,
-    isVarlen: bool = True,
     chunk_size: int = 16,
     rotary_dim_divisor: int = 4,
     dtype: str = 'float16',
@@ -211,7 +210,7 @@ def mamba_mimo_bwd_fwd(
             seq_end = T.alloc_var(T.int32)
             full_nchunks = T.alloc_var(T.int32)
             tail_len = T.alloc_var(T.int32)
-            if isVarlen:
+            if NS > 1:
                 start_seq_ind = CU_SEQLENS[i_ns]
                 start_chunk_ind = (start_seq_ind // chunk_size) + i_ns
                 seq_len = CU_SEQLENS[i_ns + 1] - CU_SEQLENS[i_ns]
@@ -554,7 +553,6 @@ def mamba_mimo_bwd_bwd(
     hasD,
     reduceO,
     NS: int = 1,
-    isVarlen: bool = False,
     chunk_size: int = 16,
     rotary_dim_divisor: int = 4,
     dtype: str = 'float16',
@@ -722,7 +720,7 @@ def mamba_mimo_bwd_bwd(
             seq_end = T.alloc_var(T.int32)
             full_nchunks = T.alloc_var(T.int32)
             tail_len = T.alloc_var(T.int32)
-            if isVarlen:
+            if NS > 1:
                 start_seq_ind = CU_SEQLENS[i_ns]
                 start_chunk_ind = (start_seq_ind // chunk_size) + i_ns
                 seq_len = CU_SEQLENS[i_ns + 1] - CU_SEQLENS[i_ns]
@@ -1319,15 +1317,10 @@ def mamba_mimo_bwd_combined_varlen(
     qk_dot = torch.zeros([B, H, S, R, R], dtype=q.dtype, device=q.device)
 
     bwd_fwd_kernel = mamba_mimo_bwd_fwd(
-        T.dynamic("B"),
-        T.dynamic("S"), 
-        T.dynamic("H"), 
-        T.dynamic("G"), 
-        N, P, R,
+        B, S, H, G, N, P, R,
         z is not None, D is not None, reduceO,
-        T.dynamic("NS"), cu_seqlens is not None, chunk_size, rotary_dim_divisor, dtype_str,
+        NS, chunk_size, rotary_dim_divisor, dtype_str,
         bf_threads, bf_num_stages)
-
     bwd_fwd_kernel(
         dout, q, k, v, q_bias, k_bias, mimo_v, mimo_o,
         dmimo_o, states,
@@ -1352,15 +1345,10 @@ def mamba_mimo_bwd_combined_varlen(
     ddA_cs = torch.zeros([B, H, S], dtype=torch.float32, device=dt.device)
 
     bwd_bwd_kernel = mamba_mimo_bwd_bwd(
-        T.dynamic("B"),
-        T.dynamic("S"), 
-        T.dynamic("H"), 
-        T.dynamic("G"),
-        N, P, R,
+        B, S, H, G, N, P, R,
         z is not None, D is not None, reduceO,
-        T.dynamic("NS"), cu_seqlens is not None, chunk_size, rotary_dim_divisor, dtype_str,
+        NS, chunk_size, rotary_dim_divisor, dtype_str,
         bb_threads, bb_num_stages)
-
     bwd_bwd_kernel(
         dout, q, k, v, q_bias, k_bias, mimo_v, mimo_o,
         dk_tilelang.view(B, S * R, H, N),

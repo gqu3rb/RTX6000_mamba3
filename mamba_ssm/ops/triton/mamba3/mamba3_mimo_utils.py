@@ -65,8 +65,8 @@ from typing import Optional, Tuple
         for s in [1, 2, 3]
         for w in [4, 8]
     ],
-    key=["CHUNK_SIZE"],
-    restore_value=["ddt_out_ptr"],
+    key=["CHUNK_SIZE"]
+    # restore_value=["ddt_out_ptr"],
 )
 @triton.jit
 def bwd_dadt_cumsum_fused_kernel(
@@ -140,8 +140,8 @@ def bwd_dadt_cumsum_fused_kernel(
         for s in [2, 3]
         for w in [4, 8]
     ],
-    key=["CHUNK_SIZE"],
-    restore_value=["ddt_out_ptr"],
+    key=["CHUNK_SIZE"]
+    # restore_value=["ddt_out_ptr"],
 
 )
 @triton.jit
@@ -1013,8 +1013,8 @@ def compute_dtrap_ddt_varlen_ref(
         for s in [1, 2, 3]
         for w in [4, 8]
     ],
-    key=["CHUNK_SIZE"],
-    restore_value=["ddt_out_ptr"],
+    key=["CHUNK_SIZE"]
+    # restore_value=["ddt_out_ptr"],
 )
 @triton.jit
 def bwd_dadt_cumsum_fused_kernel_varlen(
@@ -1082,8 +1082,8 @@ def bwd_dadt_cumsum_fused_kernel_varlen(
         for s in [2, 3]
         for w in [4, 8]
     ],
-    key=["CHUNK_SIZE"],
-    restore_value=["ddt_out_ptr"],
+    key=["CHUNK_SIZE"]
+    # restore_value=["ddt_out_ptr"],
 )
 @triton.jit
 def bwd_segsum_dadt_kernel_varlen(

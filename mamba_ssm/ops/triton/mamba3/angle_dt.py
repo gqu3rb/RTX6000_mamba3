@@ -1,3 +1,4 @@
+from __future__ import annotations
 from typing import Tuple, Optional
 
 import torch
@@ -6,7 +7,6 @@ from torch import Tensor
 import triton
 import triton.language as tl
 from mamba_ssm.ops.triton.mamba3.utils import tanh_approx, sech2_approx
-
 
 # -----------------------------------------------------------------------------
 # Forward kernel
@@ -18,7 +18,8 @@ from mamba_ssm.ops.triton.mamba3.utils import tanh_approx, sech2_approx
         for s in [1, 2, 3]
         for w in [2, 4, 8]
     ],
-    key=["CHUNK_SIZE", "BLOCK_D", "HAS_INIT_STATE", "RETURN_OUTPUT_STATE", "IS_VARLEN"],
+    key = []
+    # key=["CHUNK_SIZE", "BLOCK_D", "HAS_INIT_STATE", "RETURN_OUTPUT_STATE", "IS_VARLEN"],
 )
 @triton.jit
 def angle_dt_fwd_kernel(
@@ -26,6 +27,7 @@ def angle_dt_fwd_kernel(
     OUT, OUTPUT_STATE,
     # Inputs
     ANGLE, DT, INIT_STATE, CU_SEQLENS,
+    ANGLES_CUMSUM, 
     # Strides for OUT (batch, seqlen, nheads, dim)
     stride_out_batch, stride_out_seq, stride_out_head, stride_out_dim,
     # Strides for OUTPUT_STATE (num_sequences, nheads, dim)
@@ -38,6 +40,8 @@ def angle_dt_fwd_kernel(
     stride_init_seq, stride_init_head, stride_init_dim,
     # Stride for CU_SEQLENS
     stride_cu_seqlen,
+    # Strides for ANGLES_CUMSUM (batch, seqlen, nheads, dim)
+    stride_ac_batch, stride_ac_seq, stride_ac_head, stride_ac_dim,
     # Dimensions
     seqlen, dim,
     # Meta-parameters
@@ -65,10 +69,14 @@ def angle_dt_fwd_kernel(
 
     nchunks = tl.cdiv(seq_len, CHUNK_SIZE)
 
-    # Offset base pointers by batch and head
-    ANGLE += pid_b * stride_angle_batch + pid_h * stride_angle_head + seq_offset * stride_angle_seq
-    DT += pid_b * stride_dt_batch + pid_h * stride_dt_head + seq_offset * stride_dt_seq
-    OUT += pid_b * stride_out_batch + pid_h * stride_out_head + seq_offset * stride_out_seq
+    off_a = pid_b.to(tl.int64) * stride_angle_batch + pid_h.to(tl.int64) * stride_angle_head + seq_offset * stride_angle_seq
+    off_d = pid_b.to(tl.int64) * stride_dt_batch + pid_h.to(tl.int64) * stride_dt_head + seq_offset * stride_dt_seq
+    off_o = pid_b.to(tl.int64) * stride_out_batch + pid_h.to(tl.int64) * stride_out_head + seq_offset * stride_out_seq
+    off_ac = pid_b.to(tl.int64) * stride_ac_batch + pid_h.to(tl.int64) * stride_ac_head + seq_offset * stride_ac_seq
+    
+    ANGLE = ANGLE + off_a
+    DT = DT + off_d
+    OUT = OUT + off_o
 
     dim_range = tl.arange(0, BLOCK_D)
     dim_mask = dim_range < dim
@@ -82,45 +90,33 @@ def angle_dt_fwd_kernel(
 
     PI = 3.141592653589793
     TWO_PI = 2 * PI
-
     for chunk_idx in range(nchunks):
-        chunk_start = chunk_idx * CHUNK_SIZE
-        seq_range = tl.arange(0, CHUNK_SIZE)
-        seq_mask = (chunk_start + seq_range) < seq_len
+            chunk_start = chunk_idx * CHUNK_SIZE
 
-        # Load angle (CHUNK_SIZE, BLOCK_D)
-        angle_ptrs = ANGLE + (chunk_start + seq_range[:, None]) * stride_angle_seq + dim_range[None, :] * stride_angle_dim
-        angle_vals = tl.load(angle_ptrs, mask=seq_mask[:, None] & dim_mask[None, :], other=0.0).to(tl.float32)
-        angle_vals = tanh_approx(angle_vals) * PI
+            for i in range(CHUNK_SIZE):
+                curr_idx = chunk_start + i
+                seq_mask = curr_idx < seq_len
+                
+                if seq_mask:
 
-        # Load dt (CHUNK_SIZE,)
-        dt_ptrs = DT + (chunk_start + seq_range) * stride_dt_seq
-        dt_vals = tl.load(dt_ptrs, mask=seq_mask, other=0.0).to(tl.float32)
+                    angle_ptrs_i = ANGLE + curr_idx * stride_angle_seq + dim_range * stride_angle_dim
+                    angle_val_i = tl.load(angle_ptrs_i, mask=dim_mask, other=0.0).to(tl.float32)
+                    angle_val_i = tanh_approx(angle_val_i) * PI
+                    
 
-        # Compute vals = angle * dt
-        vals = angle_vals * dt_vals[:, None]
+                    dt_ptr_i = DT + curr_idx * stride_dt_seq
+                    dt_val_i = tl.load(dt_ptr_i).to(tl.float32)
+                    
+  
+                    state_div_2pi = state / TWO_PI
+                    state = state - TWO_PI * state_div_2pi.to(tl.int32).to(tl.float32)
+ 
+                    out_ptrs_i = OUT + curr_idx * stride_out_seq + dim_range * stride_out_dim
+                    tl.store(out_ptrs_i, state, mask=dim_mask)
 
-        # Cumsum within chunk + add state from previous chunks
-        chunk_cumsum = tl.cumsum(vals, axis=0)
-        out_vals = chunk_cumsum + state[None, :]
-
-        # Apply mod 2*pi for rotary angle normalization
-        out_vals = out_vals - TWO_PI * tl.floor(out_vals / TWO_PI)
-
-        # Store output
-        out_ptrs = OUT + (chunk_start + seq_range[:, None]) * stride_out_seq + dim_range[None, :] * stride_out_dim
-        tl.store(out_ptrs, out_vals, mask=seq_mask[:, None] & dim_mask[None, :])
-
-        # Update state: add chunk sum and apply mod 2*pi
-        chunk_sum = tl.sum(vals, axis=0)
-        state = state + chunk_sum
-        state = state - TWO_PI * tl.floor(state / TWO_PI)
-
-    # Store final state if requested
     if RETURN_OUTPUT_STATE:
         output_state_ptrs = OUTPUT_STATE + seq_idx * stride_output_state_seq + pid_h * stride_output_state_head + dim_range * stride_output_state_dim
         tl.store(output_state_ptrs, state, mask=dim_mask)
-
 
 def angle_dt_fwd(
     angle: Tensor,
@@ -130,24 +126,6 @@ def angle_dt_fwd(
     return_output_state: bool = False,
     cu_seqlens: Optional[Tensor] = None,
 ) -> Tensor | Tuple[Tensor, Tensor]:
-    """Forward pass for angle * dt cumsum.
-
-    Args:
-        angle: Angle tensor             (batch, seqlen, nheads, dim)
-        dt: Time delta tensor           (batch, nheads, seqlen)
-        init_state: Initial state       (num_sequences, nheads, dim) or None
-        chunk_size: Chunk size for chunked computation
-        return_output_state: Whether to return final state
-        cu_seqlens: Cumulative sequence lengths (num_sequences + 1,) for varlen mode
-
-    Returns:
-        If return_output_state=False:
-            out: Cumulative output      (batch, seqlen, nheads, dim)
-        If return_output_state=True:
-            Tuple of:
-                out: Cumulative output      (batch, seqlen, nheads, dim)
-                output_state: Final state   (num_sequences, nheads, dim)
-    """
     batch, seqlen, nheads, dim = angle.shape
     is_varlen = cu_seqlens is not None
     
@@ -168,7 +146,7 @@ def angle_dt_fwd(
     # Handle None init_state for kernel
     HAS_INIT_STATE = init_state is not None
     if not HAS_INIT_STATE:
-        init_state = angle  # dummy, won't be accessed
+        init_state = angle  # dummy
         stride_init = (0, 0, 0)
     else:
         stride_init = init_state.stride()
@@ -178,15 +156,24 @@ def angle_dt_fwd(
         output_state = torch.empty(num_sequences, nheads, dim, device=angle.device, dtype=angle.dtype)
         stride_output_state = output_state.stride()
     else:
-        output_state = out  # dummy, won't be accessed
+        output_state = out  # dummy
         stride_output_state = (0, 0, 0)
 
     # Handle cu_seqlens
     if cu_seqlens is not None:
         stride_cu_seqlen = cu_seqlens.stride(0)
     else:
-        cu_seqlens = angle  # dummy, won't be accessed
+        cu_seqlens = angle  # dummy
         stride_cu_seqlen = 0
+
+
+    with torch.cuda.amp.autocast(enabled=False):
+
+        dt_expanded = dt.transpose(1, 2).unsqueeze(-1).to(torch.float32) # (B, L, H, 1)
+        angle_p = torch.tanh(angle.to(torch.float32)) * 3.141592653589793 # (B, L, H, D)
+
+        angles_cumsum = torch.cumsum(angle_p * dt_expanded, dim=1).to(angle.dtype)
+
 
     # Grid setup
     if is_varlen:
@@ -194,15 +181,24 @@ def angle_dt_fwd(
     else:
         grid = (nheads, batch)
 
+        
+    angle = angle.to(torch.float16)
+    dt = dt.to(torch.float16)
+    angles_cumsum = angles_cumsum.to(torch.float16)
+    out = out.to(torch.float16)
+
     angle_dt_fwd_kernel[grid](
         out, output_state,
         angle, dt, init_state, cu_seqlens,
+        angles_cumsum,  
         out.stride(0), out.stride(1), out.stride(2), out.stride(3),
         stride_output_state[0], stride_output_state[1], stride_output_state[2],
         angle.stride(0), angle.stride(1), angle.stride(2), angle.stride(3),
         dt.stride(0), dt.stride(1), dt.stride(2),
         stride_init[0], stride_init[1], stride_init[2],
         stride_cu_seqlen,
+        
+        angles_cumsum.stride(0), angles_cumsum.stride(1), angles_cumsum.stride(2), angles_cumsum.stride(3),
         seqlen, dim,
         CHUNK_SIZE=chunk_size,
         BLOCK_D=BLOCK_D,
@@ -215,7 +211,6 @@ def angle_dt_fwd(
         return out, output_state
     return out
 
-
 # -----------------------------------------------------------------------------
 # Backward kernel
 # -----------------------------------------------------------------------------
@@ -226,7 +221,8 @@ def angle_dt_fwd(
         for s in [1, 2, 3]
         for w in [2, 4, 8]
     ],
-    key=["CHUNK_SIZE", "BLOCK_D", "HAS_INIT_STATE", "HAS_GRAD_OUTPUT_STATE", "IS_VARLEN"],
+    key = []
+    # key=["CHUNK_SIZE", "BLOCK_D", "HAS_INIT_STATE", "HAS_GRAD_OUTPUT_STATE", "IS_VARLEN"],
 )
 @triton.jit
 def angle_dt_bwd_kernel(
