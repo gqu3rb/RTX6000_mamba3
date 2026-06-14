@@ -71,15 +71,21 @@ class Mamba3(nn.Module):
     ):
         factory_kwargs = {"device": device, "dtype": dtype}
         super().__init__()
+        # model dimension, related to D in [Published Version] Mamba3.pdf, P.3
         self.d_model = d_model
+        # state dimension, related to N in [Published Version] Mamba3.pdf, P.3
         self.d_state = d_state
+        # expansion factor, related to e in Mamba2.pdf, P.26
+        # typically set to 2
         self.expand = expand
+        # head dimension, related to P in [Published Version] Mamba3.pdf, P.9
         self.headdim = headdim
         self.chunk_size = chunk_size
         self.layer_idx = layer_idx
         self.A_floor = A_floor
         self.is_outproj_norm=is_outproj_norm
         self.is_mimo = is_mimo
+        # mimo_rank is related to R in [Published Version] Mamba3.pdf, P.27
         self.mimo_rank = mimo_rank
         self.fuse_pregate_headwise_norm = bool(
             fuse_pregate_headwise_norm and self.is_mimo and self.is_outproj_norm
@@ -105,6 +111,7 @@ class Mamba3(nn.Module):
 
         # Order: [z, x, B, C, dd_dt, dd_A, trap, angle]
         d_in_proj = 2 * self.d_inner + 2 * self.d_state * self.num_bc_heads * self.mimo_rank + 3 * self.nheads + self.num_rope_angles
+        # map each vector of dimension d_model to a vector of dimension d_in_proj
         self.in_proj = nn.Linear(self.d_model, d_in_proj, bias=False, **factory_kwargs)
 
         # dt_bias parameterization        
@@ -162,6 +169,9 @@ class Mamba3(nn.Module):
         u: (batch, seqlen, hidden_dim)
         Returns: same shape as u
         """
+        # batch is batch size
+        # seqlen is the sequence length, related to T in [Published Version] Mamba3.pdf, P.3
+        # dim is the model dimension, related to D in [Published Version] Mamba3.pdf, P.3
         batch, seqlen, dim = u.shape
 
         angle_dt_state, ssm_state, k_state, v_state  = None, None, None, None
@@ -173,7 +183,17 @@ class Mamba3(nn.Module):
                 return out
 
         # Apply in_proj
+        # shape of zxBCdtAtrap is "batch seqlen d_in_proj"
+        # search for the first occurrence of d_in_proj in this file to understand what is it
+        # The position of z, x, B, C, dd_A, and angles is related to the green note on Figure 2 in [Published Version] Mamba3.pdf, P.11
+        # dd_dt is related to \Delta_t in [Published Version] Mamba3.pdf, P.5
+        # dd_A is related to A_t in [Published Version] Mamba3.pdf, P.5
+        # trap is related to \lambda in [Published Version] Mamba3.pdf, P.5
+        # angles is related to \theta(t) in Proposition 2, [Published Version] Mamba3.pdf, P.7
         zxBCdtAtrap = self.in_proj(u)
+        # the dimension of z is assigned as "batch seqlen self.d_inner"
+        # the dimension of x is assigned as "batch seqlen self.d_inner"
+        # ... etc
         z, x, B, C, dd_dt, dd_A, trap, angles = torch.split(
             zxBCdtAtrap,
             [
@@ -184,6 +204,9 @@ class Mamba3(nn.Module):
                 self.num_rope_angles
             ],
             dim=-1)
+        # change the dimension of z from "batch seqlen self.d_inner" = "batch seqlen h*p" to "batch seqlen h p"
+        # search for the first occurrence of the names of all member variables (begin with self.) in this file to know what they mean
+        # h is number of heads, related to self.nheads in this file
         z = rearrange(z, "b l (h p) -> b l h p", p=self.headdim)
         x = rearrange(x, "b l (h p) -> b l h p", p=self.headdim)
         B = rearrange(B, "b l (r g n) -> b l r g n", r=self.mimo_rank, g=self.num_bc_heads)
