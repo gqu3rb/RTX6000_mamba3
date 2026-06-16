@@ -348,8 +348,8 @@ class MambaLLM(LightningModule):
         self.llm = nn.ModuleList([
             nn.ModuleList(
                 [
-                    MambaBlock(**self.mamba_par),
-                    # Mamba3(**self.mamba_par),
+                    #MambaBlock(**self.mamba_par),
+                    Mamba3(**self.mamba_par),
                     RMSNorm(d_input)
                 ]
             )
