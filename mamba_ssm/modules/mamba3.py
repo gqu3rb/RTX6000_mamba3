@@ -85,7 +85,7 @@ class Mamba3(nn.Module):
         self.A_floor = A_floor
         self.is_outproj_norm=is_outproj_norm
         self.is_mimo = is_mimo
-        # mimo_rank is related to R in [Published Version] Mamba3.pdf, P.27
+        # mimo rank, related to R in [Published Version] Mamba3.pdf, P.27
         self.mimo_rank = mimo_rank
         self.fuse_pregate_headwise_norm = bool(
             fuse_pregate_headwise_norm and self.is_mimo and self.is_outproj_norm
@@ -98,6 +98,10 @@ class Mamba3(nn.Module):
         self.d_inner = int(self.expand * self.d_model)
         assert self.d_inner % self.headdim == 0
         self.nheads = self.d_inner // self.headdim
+        # number of heads sharing the same B and C
+        # related to Multi-input SSM in Mamba2.pdf, P.24
+        # AND
+        # related to Grouped Head Patterns in Mamba2.pdf, P.25
         self.num_bc_heads = ngroups
         
         # RoPE flags
@@ -209,14 +213,15 @@ class Mamba3(nn.Module):
         # h is number of heads, related to self.nheads in this file
         z = rearrange(z, "b l (h p) -> b l h p", p=self.headdim)
         x = rearrange(x, "b l (h p) -> b l h p", p=self.headdim)
+        # search for the first occurrence of self.num_bc_heads in this file for its meaning
         B = rearrange(B, "b l (r g n) -> b l r g n", r=self.mimo_rank, g=self.num_bc_heads)
         C = rearrange(C, "b l (r g n) -> b l r g n", r=self.mimo_rank, g=self.num_bc_heads)
         trap = rearrange(trap, "b l h -> b h l")
 
         # Compute ADT, DT
-        _A = -heavy_tail_activation(dd_A.to(torch.float32)) # (B, L, N)
+        _A = -heavy_tail_activation(dd_A.to(torch.float32)) # (B, L, N) = (batch, seqlen, self.nheads)
         _A = torch.clamp(_A, max=-self.A_floor)            
-        DT = F.softplus(dd_dt + self.dt_bias) # (B, L, N)
+        DT = F.softplus(dd_dt + self.dt_bias) # (B, L, N) = (batch, seqlen, self.nheads)
         ADT = _A * DT
         DT = rearrange(DT, "b l n -> b n l")
         ADT = rearrange(ADT, "b l n -> b n l")
