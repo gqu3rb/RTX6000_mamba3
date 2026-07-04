@@ -80,6 +80,8 @@ class Mamba3(nn.Module):
         self.expand = expand
         # head dimension, related to P in [Published Version] Mamba3.pdf, P.9
         self.headdim = headdim
+        # chunk size, related to Q in Mamba2.pdf, P.19 OR 
+        # C in [Published Version] Mamba3.pdf, P.10
         self.chunk_size = chunk_size
         self.layer_idx = layer_idx
         self.A_floor = A_floor
@@ -106,6 +108,8 @@ class Mamba3(nn.Module):
         
         # RoPE flags
         assert rope_fraction in [0.5, 1.0]
+
+        # Relatd to the '2' of h(t) \in N/2 in [Published Version] Mamba3.pdf, P.7
         self.rotary_dim_divisor = int(2/rope_fraction)
         self.split_tensor_size = int(d_state * rope_fraction)
         if self.split_tensor_size % 2 != 0:
@@ -167,7 +171,8 @@ class Mamba3(nn.Module):
         # Output projection
         self.out_proj = nn.Linear(self.d_inner, self.d_model, bias=False, **factory_kwargs)
 
-
+    # cu_seqlens means if variable length input is enabled
+    # related to: Mamba2.pdf, P.28
     def forward(self, u, seq_idx=None, cu_seqlens=None, inference_params=None):
         """
         u: (batch, seqlen, hidden_dim)
