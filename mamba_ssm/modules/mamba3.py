@@ -123,20 +123,40 @@ class Mamba3(nn.Module):
         self.in_proj = nn.Linear(self.d_model, d_in_proj, bias=False, **factory_kwargs)
 
         # dt_bias parameterization        
+        # generate the initial bias parameter value of \Delta_t for each head
+        # the generated the initial bias parameter values are log-uniform
+        # See:
+        # "D:\user\google drive - great9284@gmail.com.tw\My Drive\陽明交通大學\論文\paper\MAMBA3\src\Why Log Uniform Randomization is used to generate the Delta t bias parameter\Why Log Uniform Randomization is used to generate the Delta t bias parameter.pdf"
+        # to understand why use log-uniform randomization
         _dt = torch.exp(
+            # torch.rand generates self.nheads random numbers in the range of [0, 1)
+            # and map the result of torch.rand to [ln(dt_min, ln(dt_max))
             torch.rand(self.nheads, device=device, dtype=torch.float32) * (math.log(dt_max) - math.log(dt_min))
             + math.log(dt_min)
         )
+        # prevent from _dt too close to 0 or equals to 0, 
+        # causing the result of log(-torch.expm1(-_dt)) in the next line approaches to -\Inf
         _dt = torch.clamp(_dt, min=dt_init_floor)
+        # given the _dt that has been calculated, solve for _dt_bias such that
+        # softplus(_dt_bias) == _dt
+        # expm1(x) is functionally equivalet to $1 - exp(x)$, but is improved to avoid Catastrophic Cancellation problem
         _dt_bias = _dt + torch.log(-torch.expm1(-_dt))
+        # make the dt_bias to be a trainable parameter
         self.dt_bias = nn.Parameter(_dt_bias, requires_grad=True)
+        # disable weight decay during the training process of dt_bias
         self.dt_bias._no_weight_decay = True
         
         # B and C biases
+        # set the initial trainning values
+        # Their dimension can be referred to: 
+        # [Published Version] "B, C Biases", Mamba3.pdf, P.11
+        # setting initial value to all 1's just for simplicity
+        # Refer to: [Published Version] "B, C Bias Parameterization", Mamba3.pdf, P.30
         self.B_bias = nn.Parameter(1+torch.zeros((self.nheads, self.mimo_rank, self.d_state), dtype=torch.float32, device=device), requires_grad=True)
         self.C_bias = nn.Parameter(1+torch.zeros((self.nheads, self.mimo_rank, self.d_state), dtype=torch.float32, device=device), requires_grad=True)
                                                        
         # RMS Norm for B and C
+        # Refer to: [Published Version] "BC / QK Normalization.", Mamba3.pdf, P.11
         assert RMSNormGated is not None
         self.B_norm = RMSNormGated(self.d_state, eps=1e-5, **factory_kwargs)
         self.C_norm = RMSNormGated(self.d_state, eps=1e-5, **factory_kwargs)
@@ -224,14 +244,45 @@ class Mamba3(nn.Module):
         trap = rearrange(trap, "b l h -> b h l")
 
         # Compute ADT, DT
+        # dd_A may be positive, but the resulting \Delta A_t (i.e. ADT) must be negative.
+        # Related to:
+        # Mamba-2’s Parameterization, [Published Version] Mamba3.pdf, P.3 (Mamba3 inherits such design in Mamba2)
+        # AND
+        # 3.5.1 Connection to Gating Mechanisms, Mamba1.pdf, P.8
+        # AND
+        # C Mechanics of Selective SSMs, Mamba1.pdf, P.27
+        # AND
+        # the heavy_tail_activation() function defined at the top of this file
+        # So we apply heavy_tail_activation to dd_A to make it be positive, and then add a negative
+        # sign to ensure it is negative. (Note that applying such an activation to dd_A is not
+        # explicitly described in [Published Version] Mamba3.pdf)
+        # NOTE: upstream commit c69aaab "Stabilize data-dependent A with heavy-tail activation (#962)"
+        # replaced the previous -F.softplus(dd_A) with -heavy_tail_activation(dd_A).
+        # Both are positive-valued, so the sign reasoning above is unchanged; the heavy-tail
+        # activation f(x) = 1+x (x>=0), 1/(1-x) (x<0) decays more slowly than softplus for very
+        # negative x, which improves stability during WSD training and at higher learning rates.
         _A = -heavy_tail_activation(dd_A.to(torch.float32)) # (B, L, N) = (batch, seqlen, self.nheads)
+        # set _A to -self.A_floor if it is larger than -self.A_floor
+        # this line is used to prevent _A underflows and equals 0 (which makes ADT equal to 0,
+        # violating the rule that \Delta A_t must be negative) when dd_A is very small
+        # thi line is not included in any mamba papers
         _A = torch.clamp(_A, max=-self.A_floor)            
+        # Refer to: Algorithm 2, Mamba1.pdf, P.6
         DT = F.softplus(dd_dt + self.dt_bias) # (B, L, N) = (batch, seqlen, self.nheads)
+        # '*' is element-wise multiplication
         ADT = _A * DT
+        # rearrange the dimension of DT and ADT to match the memory mapping and parallel processing setting of 
+        # Triton/tilelang kernel 
+        # Related to:
+        # Ctrl+F "ADT, DT, Trap:              (batch, nheads, seqlen)"
+        # in mamba/mamba_ssm/ops/triton/mamba3/mamba3_siso_fwd.py
         DT = rearrange(DT, "b l n -> b n l")
         ADT = rearrange(ADT, "b l n -> b n l")
 
         # Compute angle — cast to float32 as required by the MIMO/SISO kernels
+        # .unsqueeze(-2) changes the dimension of angles from (batch, seqlen, num_rope_angles) to (batch, seqlen, 1, num_rope_angles)
+        # .expand brocast the num_rope_angles, changes the dimension of angles from (batch, seqlen, 1, num_rope_angles) to (batch, seqlen, self.nheads, num_rope_angles)
+        # use float32 is due to the sensitivity of precision error of cos_approx and sin_approx calculation in mamba/mamba_ssm/ops/triton/mamba3/mamba3_siso_fwd.py
         angles = angles.unsqueeze(-2).expand(-1, -1, self.nheads, -1).to(torch.float32) # (B, L, N, S)
 
         # Apply RMS Norm on B and C
