@@ -88,6 +88,7 @@ class Mamba3(nn.Module):
         self.is_outproj_norm=is_outproj_norm
         self.is_mimo = is_mimo
         # mimo rank, related to R in [Published Version] Mamba3.pdf, P.27
+        # Ctrl+F "mimo_rank not in" in mamba/mamba_ssm/ops/tilelang/mamba3/mamba3_mimo.py to know the supporting mimo_rank values
         self.mimo_rank = mimo_rank
         self.fuse_pregate_headwise_norm = bool(
             fuse_pregate_headwise_norm and self.is_mimo and self.is_outproj_norm
@@ -291,6 +292,9 @@ class Mamba3(nn.Module):
         
         # Apply Mamba-3 kernel
         if self.is_mimo:
+            # call the mamba3_mimo function in mamba/mamba_ssm/ops/tilelang/mamba3/mamba3_mimo.py
+            # related to:
+            # Ctrl+F the first occurrence of "mamba3_mimo_combined" in this file
             y = mamba3_mimo_combined(
                 Q=C,
                 K=B,

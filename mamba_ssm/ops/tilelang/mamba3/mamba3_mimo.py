@@ -31,6 +31,11 @@ class _Mamba3Function(torch.autograd.Function):
     """Custom autograd function for Mamba-3 with Triton/Tilelang kernels."""
     
     @staticmethod
+    # marking some parameters with Tensor has two purpose:
+    # 1. used to remind the reader that those parameters are Tensors, instead of a scalar 
+    # 2. IMPORTANT: .apply() will chekc if the parameters passed into forward() is a Tensor AND 
+    #    if the type of each parameter is the same as that in backward()
+    # Ctrl+F "apply()" in this file to understand what it is and what the parameters in the forwrd() means
     def forward(
         ctx,
         Q: Tensor,
@@ -62,6 +67,9 @@ class _Mamba3Function(torch.autograd.Function):
         ctx.dtype = dtype
         ctx.fuse_pregate_headwise_rms_norm = fuse_pregate_headwise_rms_norm
         ctx.outproj_norm_eps = outproj_norm_eps
+        # call Q.contiguous(), K.contiguous(), ... in order to ensure that those Tensors is placed in
+        # contiguous memory addresses
+        # it is important because TileLang will move pieces of data in contiguous memory addresses
         (Q, K, V, ADT, DT, Trap, Q_bias, K_bias, MIMO_V, MIMO_Z, MIMO_Out, Out_Norm_Weight, Angles, D, Z) = tuple(
             t.contiguous() if t is not None else None
             for t in (
@@ -317,12 +325,33 @@ def mamba3_mimo(
 
     """
     
+    # in mamba3.py:
+    # where b is batch; l is sequence length; h is number of heads; n is state dimension
+    """
+    x = rearrange(x, "b l (h p) -> b l h p", p=self.headdim)
+    ...
+    C = rearrange(C, "b l (r g n) -> b l r g n", r=self.mimo_rank, g=self.num_bc_heads)
+    ...
+    y = mamba3_mimo_combined(
+        Q=C,
+        ...
+        V=x,
+        ...
+    )
+    """
     batch, seqlen, mimo_rank, nheads_qk, headdim_qk = Q.shape
     _, _, nheads, headdim_v = V.shape
     
+    # >= 8 limitation is for the correct compilation of TileLang
     assert chunk_size >= 8, f"chunk_size must be at least 8"
+
+    # Ctrl+F "Args" in this file and see the description below it to understand the meaning of nheads, nheads_qk, ...
+    # note that nheads_qk is num_bc_heads in mamba3.py
     assert nheads % nheads_qk == 0, f"nheads ({nheads}) must be divisible by nheads_qk ({nheads_qk})"
+    # state dimension of the equivalent real value B and C
+    # Related to: Section 3.2.1, [Published Version] Mamba3.pdf, P.7
     assert headdim_qk % 2 == 0, f"headdim_qk ({headdim_qk}) must be even for rotary embeddings"
+    # Ctrl+F "self.rotary_dim_divisor" to know what it is
     assert rotary_dim_divisor in [2, 4], f"currently only supports rotary embedding on entire or half of headdim_qk"
     # NOTE: the following (headdim_qk, headdim_v) values currently can result in compilation errors: (16, 32), (256, 128) 
     if headdim_qk not in [16, 32, 64, 128, 256]:
@@ -338,6 +367,8 @@ def mamba3_mimo(
     if chunk_size*mimo_rank > 64:
         print(f"WARNING: chunk_size * mimo_rank = {chunk_size*mimo_rank} exceeds 64, which may result in smem over-allocation. Consider decreasing chunk_size.")
 
+    # .apply() is the built-in function in PyTorch
+    # when .apply() is called, PyTorch will run the .forward() in the class, and then call .backward() to calculate gradient
     return _Mamba3Function.apply(
         Q,
         K,
