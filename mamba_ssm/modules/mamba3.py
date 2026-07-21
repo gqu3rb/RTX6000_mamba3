@@ -74,11 +74,18 @@ class Mamba3(nn.Module):
         # model dimension, related to D in [Published Version] Mamba3.pdf, P.3
         self.d_model = d_model
         # state dimension, related to N in [Published Version] Mamba3.pdf, P.3
+        # generally set to around 64 or 128, refer to Mamba2.pdf, P.24
         self.d_state = d_state
         # expansion factor, related to e in Mamba2.pdf, P.26
         # typically set to 2
         self.expand = expand
         # head dimension, related to P in [Published Version] Mamba3.pdf, P.9
+        # The head dimension is generally set to around 64 or 128, refer to Mamba2.pdf, P.24
+        # The definitions of head dimension in 
+        # [Published Version] Mamba3.pdf, P.9
+        # AND
+        # Mamba2.pdf, P.24
+        # are the same, but there is a more detailed explanation on Mamba2.pdf, P.24
         self.headdim = headdim
         # chunk size, related to Q in Mamba2.pdf, P.19 OR 
         # C in [Published Version] Mamba3.pdf, P.10
