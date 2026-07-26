@@ -661,6 +661,18 @@ class Mamba3(nn.Module):
         
         h_state = torch.zeros(batch, self.nheads, self.headdim, self.d_state, device=u.device, dtype=torch.float32)
 
+        # nano accumulates the RoPE phase inside its kernel as
+        # cumsum(tanh(angles) * pi * DT) mod 2*pi -- see angle_dt.py:94-108 on `nano` branch.
+        # angle_state is the carried phase; angles_cumsum records it for compare.py.
+        TWO_PI = 2.0 * math.pi
+        angle_state = torch.zeros(
+            batch, self.nheads, self.num_rope_angles, device=u.device, dtype=torch.float32
+        )
+        angles_cumsum = torch.zeros(
+            batch, seqlen, self.nheads, self.num_rope_angles,
+            device=u.device, dtype=torch.float32,
+        )
+
         for t in range(seqlen):
             x_t = x[:, t]
             dt_t = DT[:, t]
@@ -669,7 +681,18 @@ class Mamba3(nn.Module):
             C_t = C[:, t]
             angles_t = angles[:, t]
             
-            target_angles = angles_t.view(batch, 1, self.nheads, -1)
+            # Accumulate the angle first, then rotate
+            # cumsum
+            # Related to:
+            # angle_dt.py:104 on `nano`
+            angle_state = angle_state + torch.tanh(angles_t) * math.pi * dt_t.unsqueeze(-1)
+            # Related to:
+            # angle_dt.py:108 on `nano`
+            angle_state = angle_state - TWO_PI * torch.floor(angle_state / TWO_PI)
+
+            angles_cumsum[:, t] = angle_state
+
+            target_angles = angle_state.view(batch, 1, self.nheads, -1)
             B_t = self._apply_rope_pytorch(B_t, target_angles)
             C_t = self._apply_rope_pytorch(C_t, target_angles)
             
@@ -694,6 +717,8 @@ class Mamba3(nn.Module):
                 y_t = torch.sum(h_state * C_t[:, 0, 0, :].view(batch, self.nheads, 1, -1), dim=-1)
                 y_t = y_t + x_t * self.D.unsqueeze(0).unsqueeze(-1)
                 y_out[:, t, 0, :, :] = y_t
+
+        tap("angles_cumsum", angles_cumsum)
 
         if self.is_mimo:
             if self.is_outproj_norm:
