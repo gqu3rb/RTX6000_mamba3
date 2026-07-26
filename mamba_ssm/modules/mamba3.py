@@ -505,6 +505,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from einops import rearrange, repeat
+from mamba_ssm.utils.tap import tap
 
 class RMSNormPyTorch(nn.Module):
     def __init__(self, d_model, eps=1e-5):
@@ -625,20 +626,36 @@ class Mamba3(nn.Module):
             dim=-1
         )
         
+        # Tapped before the rearranges below: nano transposes trap/angles at this point,
+        # so tapping here keeps both branches on the same (b, l, h) layout.
+        tap("dd_dt", dd_dt)
+        tap("dd_A", dd_A)
+        tap("trap_raw", trap)
+        tap("angles_raw", angles)
+
         z = rearrange(z, "b l (h p) -> b l h p", p=self.headdim)
         x = rearrange(x, "b l (h p) -> b l h p", p=self.headdim)
         B = rearrange(B, "b l (r g n) -> b l r g n", r=self.mimo_rank, g=self.num_bc_heads)
         C = rearrange(C, "b l (r g n) -> b l r g n", r=self.mimo_rank, g=self.num_bc_heads)
+        tap("z", z)
+        tap("x", x)
+        tap("B_raw", B)
+        tap("C_raw", C)
         trap = rearrange(trap, "b l h -> b l h")
 
         _A = -F.softplus(dd_A.to(torch.float32))
-        _A = torch.clamp(_A, max=-self.A_floor)            
+        _A = torch.clamp(_A, max=-self.A_floor)
+        tap("A", _A)
         DT = F.softplus(dd_dt + self.dt_bias)
-        
+        tap("DT", DT)   # nano taps DT here too, before it transposes to (b, n, l)
+
         angles = angles.unsqueeze(-2).expand(-1, -1, self.nheads, -1).to(torch.float32)
+        tap("angles_exp", angles)
 
         B = self.B_norm(B)
         C = self.C_norm(C)
+        tap("B_normed", B)
+        tap("C_normed", C)
 
         y_out = torch.zeros(batch, seqlen, self.mimo_rank, self.nheads, self.headdim, device=x.device, dtype=x.dtype) if self.is_mimo else torch.zeros(batch, seqlen, self.nheads, self.headdim, device=x.device, dtype=x.dtype)
         
@@ -693,5 +710,7 @@ class Mamba3(nn.Module):
                 z = rearrange(z, "b l h p -> b l (h p)")
                 y_out = self.norm(y_out, z)
         
+        tap("y_pre_outproj", y_out)
         out = self.out_proj(y_out.to(u.dtype))
+        tap("out", out)
         return out
