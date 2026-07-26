@@ -18,6 +18,8 @@ from mamba_ssm.ops.triton.mamba3.mamba3_siso_combined import mamba3_siso_combine
 
 from mamba_ssm.ops.triton.mamba3.mamba3_mimo_rotary_step import apply_rotary_qk_inference_fwd
 
+from mamba_ssm.utils.tap import tap
+
 try:
     from mamba_ssm.ops.cute.mamba3.mamba3_step_fn import mamba3_step_fn
 except ImportError:    
@@ -159,27 +161,42 @@ class Mamba3(nn.Module):
                 self.num_rope_angles
             ],
             dim=-1)
+        # Tapped before the rearranges below transpose trap/angles, so both branches
+        # record the same (b, l, h) layout. See mamba_ssm/utils/tap.py.
+        tap("dd_dt", dd_dt)
+        tap("dd_A", dd_A)
+        tap("trap_raw", trap)
+        tap("angles_raw", angles)
         z = rearrange(z, "b l (h p) -> b l h p", p=self.headdim)
         x = rearrange(x, "b l (h p) -> b l h p", p=self.headdim)
         B = rearrange(B, "b l (r g n) -> b l r g n", r=self.mimo_rank, g=self.num_bc_heads)
         C = rearrange(C, "b l (r g n) -> b l r g n", r=self.mimo_rank, g=self.num_bc_heads)
+        tap("z", z)
+        tap("x", x)
+        tap("B_raw", B)
+        tap("C_raw", C)
         trap = rearrange(trap, "b l h -> b h l")
 
         # Compute ADT, DT
         _A = -F.softplus(dd_A.to(torch.float32)) # (B, L, N)
-        _A = torch.clamp(_A, max=-self.A_floor)            
+        _A = torch.clamp(_A, max=-self.A_floor)
+        tap("A", _A)
         DT = F.softplus(dd_dt + self.dt_bias) # (B, L, N)
+        tap("DT", DT)   # tapped BEFORE the transpose below; rtx keeps this layout
         ADT = _A * DT
         DT = rearrange(DT, "b l n -> b n l")
         ADT = rearrange(ADT, "b l n -> b n l")
 
         # Compute angle — cast to float32 as required by the MIMO/SISO kernels
         angles = angles.unsqueeze(-2).expand(-1, -1, self.nheads, -1).to(torch.float32) # (B, L, N, S)
+        tap("angles_exp", angles)
 
         # Apply RMS Norm on B and C
         B = self.B_norm(B)
         C = self.C_norm(C)
-        
+        tap("B_normed", B)
+        tap("C_normed", C)
+
         # Apply Mamba-3 kernel
         if self.is_mimo:
             y = mamba3_mimo_combined(
@@ -246,7 +263,9 @@ class Mamba3(nn.Module):
                 z = rearrange(z, "b l h p -> b l (h p)")
                 y = self.norm(y, z)
         
+        tap("y_pre_outproj", y)
         out = self.out_proj(y.to(x.dtype))
+        tap("out", out)
         return out
     
 
