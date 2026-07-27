@@ -692,15 +692,29 @@ class Mamba3(nn.Module):
 
             angles_cumsum[:, t] = angle_state
 
-            target_angles = angle_state.view(batch, 1, self.nheads, -1)
-            B_t = self._apply_rope_pytorch(B_t, target_angles)
-            C_t = self._apply_rope_pytorch(C_t, target_angles)
+            # broadcast B_t from (b, r, g, n) to (b, r, h, n) and assign it to B_t_aligned
+            heads_per_group = self.nheads // self.num_bc_heads
+            B_t[:, 0].shape # (b, g, n)
+            B_t_aligned = (B_t[:, 0].repeat_interleave(heads_per_group, dim=1) if not self.is_mimo else B_t[:, :, 0, :])
+            C_t_aligned = C_t[:, 0].repeat_interleave(heads_per_group, dim=1)
+
+            # add the bias after BC norm (refer to: section 3.4, [Published Version] Mamba3.pdf)
+            # and before RoPE (refer to: mamba3_siso_fwd.py:295, 297, 313, 328 of `nano` branch)
+            """
+            the shape of self.B_bias is (h, r=1, n)
+            the shape of self.B_bias.squeeze(1) is (h, n)
+            self.B_bias.squeeze(1) is brocasted to (b, 1, r=1, h, n) automatically by PyTorch, 
+            and is added to B_t_aligned
+            """
+            B_t_aligned = B_t_aligned + self.B_bias.squeeze(1)
+            C_t_aligned = C_t_aligned + self.C_bias.squeeze(1)
+
+            B_t_aligned = self._apply_rope_pytorch(B_t_aligned, angle_state)
+            C_t_aligned = self._apply_rope_pytorch(C_t_aligned, angle_state)
             
             dt_t_exp = dt_t.unsqueeze(-1).unsqueeze(-1)
             A_t_exp = A_t.unsqueeze(-1).unsqueeze(-1)
             A_bar = torch.exp(A_t_exp * dt_t_exp)
-            
-            B_t_aligned = B_t[:, 0, 0, :].unsqueeze(1) if not self.is_mimo else B_t[:, :, 0, :]
             
             if not self.is_mimo:
                 update = (x_t.unsqueeze(-1) * dt_t_exp) * B_t_aligned.unsqueeze(2)
@@ -730,6 +744,11 @@ class Mamba3(nn.Module):
                 y_out = torch.einsum("blrhp,hrp->blhp", y_out, self.mimo_o)
             y_out = rearrange(y_out, "b l h p -> b l (h p)")
         else:
+            # nano passes Z=z into the SISO kernel (mamba3.py:249 on `nano`), and the kernel
+            # applies acc_o = acc_o * silu(z) in fp32 AFTER the D-skip is added
+            # (mamba3_siso_fwd.py:403 adds D, then :411-412 gates)
+            if not self.is_outproj_norm:
+                y_out = y_out * F.silu(z.float())
             y_out = rearrange(y_out, "b l h p -> b l (h p)")
             if self.is_outproj_norm:
                 z = rearrange(z, "b l h p -> b l (h p)")
