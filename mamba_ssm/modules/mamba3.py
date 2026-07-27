@@ -649,6 +649,17 @@ class Mamba3(nn.Module):
         DT = F.softplus(dd_dt + self.dt_bias)
         tap("DT", DT)   # nano taps DT here too, before it transposes to (b, n, l)
 
+        # nano's trapezoidal discretization (mamba3_siso_fwd.py:274-289). `trap` was split
+        # out of in_proj and then never used; it is the raw logit, sigmoided in the kernel.
+        #   gamma = dt * sigmoid(trap)                          -> weights the DIAGONAL (s == t)
+        #   scale = gamma + dt[t+1] * (1 - sigmoid(trap[t+1]))  -> weights the STATE  (s <  t)
+        # dt_shifted is masked to 0 at the last position (:277), so shifted_gamma vanishes there.
+        trap_sig  = torch.sigmoid(trap.float())                  # (b, l, h)
+        gamma_all = DT * trap_sig                                # (b, l, h)
+        shifted   = torch.zeros_like(gamma_all)
+        shifted[:, :-1] = DT[:, 1:] * (1.0 - trap_sig[:, 1:])
+        scale_all = gamma_all + shifted                          # (b, l, h)
+
         angles = angles.unsqueeze(-2).expand(-1, -1, self.nheads, -1).to(torch.float32)
         tap("angles_exp", angles)
 
@@ -717,12 +728,18 @@ class Mamba3(nn.Module):
             A_bar = torch.exp(A_t_exp * dt_t_exp)
             
             if not self.is_mimo:
-                update = (x_t.unsqueeze(-1) * dt_t_exp) * B_t_aligned.unsqueeze(2)
-                h_state = h_state * A_bar + update
-                C_t_aligned = C_t[:, 0, 0, :].unsqueeze(1)
-                y_t = torch.sum(h_state * C_t_aligned.unsqueeze(2), dim=-1)
+                gamma_exp = gamma_all[:, t].unsqueeze(-1).unsqueeze(-1)   # (b, h, 1, 1)
+                scale_exp = scale_all[:, t].unsqueeze(-1).unsqueeze(-1)
+
+                h_decayed = h_state * A_bar
+                cur = x_t.unsqueeze(-1) * B_t_aligned.unsqueeze(2)        # (b,h,p,n), unweighted
+                # y_t sees only gamma of the current step (nano's qk_dot * gamma),
+                # but the state carries scale forward (nano's k_pre_block *= scale).
+                y_t = torch.sum((h_decayed + cur * gamma_exp) * C_t_aligned.unsqueeze(2), dim=-1)
                 y_t = y_t + x_t * self.D.unsqueeze(0).unsqueeze(-1)
                 y_out[:, t, :, :] = y_t
+
+                h_state = h_decayed + cur * scale_exp
             else:
                 # MIMO logic expansion for golden model
                 # Simplification: processing first rank for hardware verification reference
