@@ -39,7 +39,7 @@ class MambaEvalWrapper(HFLM):
         self._batch_size = int(batch_size) if batch_size is not None else 64
         self._max_length = max_length
         self._device = torch.device(device)
-        # self.add_bos_token is used in 
+        # self.add_bos_token is used in
         # ~/.conda/envs/mamba3/lib/python3.10/site-packages/lm_eval/models/huggingface.py
         # if self.add_bos_token doesn't exist, an AttributeError will be raised
         self.add_bos_token = add_bos_token

@@ -8,6 +8,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Optional, Tuple
 
+from mamba_ssm.utils.tap import tap
 import torch
 from torch import Tensor
 import triton
@@ -16,8 +17,6 @@ import triton
 from mamba_ssm.ops.triton.mamba3.mamba3_siso_fwd import mamba3_siso_fwd
 from mamba_ssm.ops.triton.mamba3.mamba3_siso_bwd import compute_dzdo, compute_dqkv, compute_dqktheta, compute_ddt_dtrap_dinput_states
 from mamba_ssm.ops.triton.mamba3.angle_dt import angle_dt_fwd, angle_dt_bwd
-
-from mamba_ssm.utils.tap import tap
 
 
 def _triton_alloc_fn(size: int, alignment: int, stream: Optional[int]):
@@ -90,18 +89,12 @@ class _Mamba3Function(torch.autograd.Function):
         assert all_states_present or all_states_absent, "Input states must be provided together or all be None."
         
         Angles_Cumsum, Final_Angle_State = angle_dt_fwd(
-            Angles, DT,
-            init_state=Input_Angle_State,
-            chunk_size=chunk_size,
+            Angles, DT, 
+            init_state=Input_Angle_State, 
+            chunk_size=chunk_size, 
             return_output_state=True,
             cu_seqlens=cu_seqlens,
         )
-        # The accumulated RoPE phase, cumsum_L(tanh(Angles) * pi * DT) mod 2pi -- see
-        # angle_dt.py:94-108. It is passed into mamba3_siso_fwd below and then freed, so this
-        # is the only place a caller can observe it. Tapped so mamba3_compare_nano4 can compare
-        # it against the rtx6000-adapt loop's angle, which is the actual reference for that
-        # branch's RoPE. Note this tensor is bf16 (Angles is downcast at line ~397), so a
-        # phase near 2pi carries ~0.03 of quantization -- that is the comparison's noise floor.
         tap("angles_cumsum", Angles_Cumsum)
 
         Input_States = (

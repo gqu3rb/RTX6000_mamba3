@@ -3,6 +3,7 @@
 import math
 from einops import rearrange, repeat
 
+from mamba_ssm.utils.tap import tap
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -18,12 +19,27 @@ from mamba_ssm.ops.triton.mamba3.mamba3_siso_combined import mamba3_siso_combine
 
 from mamba_ssm.ops.triton.mamba3.mamba3_mimo_rotary_step import apply_rotary_qk_inference_fwd
 
-from mamba_ssm.utils.tap import tap
-
 try:
     from mamba_ssm.ops.cute.mamba3.mamba3_step_fn import mamba3_step_fn
 except ImportError:    
     mamba3_step_fn = None
+
+
+def heavy_tail_activation(x: torch.Tensor) -> torch.Tensor:
+    """
+    Heavy-tail activation for data-dependent A.
+
+    Using this activation can improve stability during WSD training and at
+    higher learning rates.
+
+        f(x) = 1 + x        if x >= 0
+            = 1 / (1 - x)  if x < 0
+
+    The function is positive, continuous, and differentiable at x = 0.
+    """
+    neg = x.clamp_max(0)
+    pos = x.clamp_min(0)
+    return pos + torch.reciprocal(1 - neg)
 
 class Mamba3(nn.Module):
     def __init__(
@@ -43,6 +59,7 @@ class Mamba3(nn.Module):
         is_outproj_norm=False,
         is_mimo=False,
         mimo_rank=4,
+        fuse_pregate_headwise_norm=True,
         #-------------------------------------------
         # Fused kernel and sharding options
         chunk_size=64, # Recommended: 64 for SISO, 64/mimo_rank for MIMO
@@ -65,6 +82,9 @@ class Mamba3(nn.Module):
         self.is_outproj_norm=is_outproj_norm
         self.is_mimo = is_mimo
         self.mimo_rank = mimo_rank
+        self.fuse_pregate_headwise_norm = bool(
+            fuse_pregate_headwise_norm and self.is_mimo and self.is_outproj_norm
+        )
         if not self.is_mimo:
             self.mimo_rank = 1
         else:
@@ -129,6 +149,10 @@ class Mamba3(nn.Module):
                 group_size=self.headdim,
                 **factory_kwargs
             )
+            if self.fuse_pregate_headwise_norm:
+                assert self.norm.weight.numel() == self.nheads * self.headdim, (
+                    "Fused pregate headwise norm expects one norm weight per head/headdim element."
+                )
 
         # Output projection
         self.out_proj = nn.Linear(self.d_inner, self.d_model, bias=False, **factory_kwargs)
@@ -178,9 +202,8 @@ class Mamba3(nn.Module):
         trap = rearrange(trap, "b l h -> b h l")
 
         # Compute ADT, DT
-        _A = -F.softplus(dd_A.to(torch.float32)) # (B, L, N)
-        _A = torch.clamp(_A, max=-self.A_floor)
-        tap("A", _A)
+        _A = -heavy_tail_activation(dd_A.to(torch.float32)) # (B, L, N)
+        _A = torch.clamp(_A, max=-self.A_floor)            
         DT = F.softplus(dd_dt + self.dt_bias) # (B, L, N)
         tap("DT", DT)   # tapped BEFORE the transpose below; rtx keeps this layout
         ADT = _A * DT
@@ -196,7 +219,7 @@ class Mamba3(nn.Module):
         C = self.C_norm(C)
         tap("B_normed", B)
         tap("C_normed", C)
-
+        
         # Apply Mamba-3 kernel
         if self.is_mimo:
             y = mamba3_mimo_combined(
@@ -210,15 +233,18 @@ class Mamba3(nn.Module):
                 K_bias=self.B_bias,
                 MIMO_V=self.mimo_x,
                 MIMO_Z=self.mimo_z,
-                MIMO_Out=self.mimo_o if not self.is_outproj_norm else None,
+                MIMO_Out=self.mimo_o if (self.fuse_pregate_headwise_norm or not self.is_outproj_norm) else None,
                 Angles=angles,
                 D=self.D,
-                Z=z if not self.is_outproj_norm else None,
+                Z=z if (self.fuse_pregate_headwise_norm or not self.is_outproj_norm) else None,
                 chunk_size=self.chunk_size,
                 rotary_dim_divisor=self.rotary_dim_divisor,
                 dtype=x.dtype,
                 return_state=ssm_state is not None,
                 cu_seqlens=cu_seqlens,
+                fuse_pregate_headwise_rms_norm=self.fuse_pregate_headwise_norm,
+                outproj_norm_weight=self.norm.weight if self.fuse_pregate_headwise_norm else None,
+                outproj_norm_eps=self.norm.eps if self.fuse_pregate_headwise_norm else 1e-5,
             )
             if ssm_state is not None:
                 y, last_angle, last_state, last_k, last_v, *rest = y
@@ -226,7 +252,7 @@ class Mamba3(nn.Module):
                 ssm_state.copy_(last_state)
                 k_state.copy_(last_k)
                 v_state.copy_(last_v)
-            if self.is_outproj_norm:
+            if self.is_outproj_norm and not self.fuse_pregate_headwise_norm:
                 z = torch.einsum("blhp,hrp->blrhp", z.float(), self.mimo_z)
                 z = rearrange(z, "b l r h p -> b l r (h p)")
                 y = rearrange(y, "b l r h p -> b l r (h p)").float()
@@ -270,8 +296,9 @@ class Mamba3(nn.Module):
     
 
     def _preprocess(self, A_proj, dd_dt, B, C, x, z, trap_proj, angle_proj):
-        _A = -F.softplus(A_proj.to(torch.float32))
+        _A = -heavy_tail_activation(A_proj.to(torch.float32))
         _A = torch.clamp(_A, max=-self.A_floor)
+        tap("A", _A)
         DT = F.softplus(dd_dt + self.dt_bias)
         trap = torch.sigmoid(trap_proj)
 
