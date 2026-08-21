@@ -52,6 +52,15 @@ class MambaEvalWrapper(HFLM):
         # It is used for free text generation. Leave it here is just a defensive action.
         self.truncation = truncation
 
+        # lm_eval 0.4.3 reads these four attributes;
+        # without them the run crashes with AttributeError after the evaluation has already
+        # finished, losing the results.
+        # This modifications are back compatible with 0.4.2, which never reads them.
+        self.pretrained = pretrained
+        self.revision = "main"
+        self.peft = None
+        self.delta = None
+
     @property
     def batch_size(self):
         return self._batch_size
