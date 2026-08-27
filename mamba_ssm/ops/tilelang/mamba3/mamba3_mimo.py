@@ -32,8 +32,8 @@ class _Mamba3Function(torch.autograd.Function):
     
     @staticmethod
     # marking some parameters with Tensor has two purpose:
-    # 1. used to remind the reader that those parameters are Tensors, instead of a scalar 
-    # 2. IMPORTANT: .apply() will chekc if the parameters passed into forward() is a Tensor AND 
+    # 1. used to remind the reader that those parameters are Tensors, instead of a scalar
+    # 2. IMPORTANT: .apply() will chekc if the parameters passed into forward() is a Tensor AND
     #    if the type of each parameter is the same as that in backward()
     # Ctrl+F "apply()" in this file to understand what it is and what the parameters in the forwrd() means
     def forward(

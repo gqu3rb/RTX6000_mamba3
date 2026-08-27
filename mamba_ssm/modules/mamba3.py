@@ -81,13 +81,13 @@ class Mamba3(nn.Module):
         self.expand = expand
         # head dimension, related to P in [Published Version] Mamba3.pdf, P.9
         # The head dimension is generally set to around 64 or 128, refer to Mamba2.pdf, P.24
-        # The definitions of head dimension in 
+        # The definitions of head dimension in
         # [Published Version] Mamba3.pdf, P.9
         # AND
         # Mamba2.pdf, P.24
         # are the same, but there is a more detailed explanation on Mamba2.pdf, P.24
         self.headdim = headdim
-        # chunk size, related to Q in Mamba2.pdf, P.19 OR 
+        # chunk size, related to Q in Mamba2.pdf, P.19 OR
         # C in [Published Version] Mamba3.pdf, P.10
         self.chunk_size = chunk_size
         self.layer_idx = layer_idx
@@ -142,7 +142,7 @@ class Mamba3(nn.Module):
             torch.rand(self.nheads, device=device, dtype=torch.float32) * (math.log(dt_max) - math.log(dt_min))
             + math.log(dt_min)
         )
-        # prevent from _dt too close to 0 or equals to 0, 
+        # prevent from _dt too close to 0 or equals to 0,
         # causing the result of log(-torch.expm1(-_dt)) in the next line approaches to -\Inf
         _dt = torch.clamp(_dt, min=dt_init_floor)
         # given the _dt that has been calculated, solve for _dt_bias such that
@@ -156,7 +156,7 @@ class Mamba3(nn.Module):
         
         # B and C biases
         # set the initial trainning values
-        # Their dimension can be referred to: 
+        # Their dimension can be referred to:
         # [Published Version] "B, C Biases", Mamba3.pdf, P.11
         # setting initial value to all 1's just for simplicity
         # Refer to: [Published Version] "B, C Bias Parameterization", Mamba3.pdf, P.30
@@ -284,8 +284,8 @@ class Mamba3(nn.Module):
         DT = F.softplus(dd_dt + self.dt_bias) # (B, L, N) = (batch, seqlen, self.nheads)
         # '*' is element-wise multiplication
         ADT = _A * DT
-        # rearrange the dimension of DT and ADT to match the memory mapping and parallel processing setting of 
-        # Triton/tilelang kernel 
+        # rearrange the dimension of DT and ADT to match the memory mapping and parallel processing setting of
+        # Triton/tilelang kernel
         # Related to:
         # Ctrl+F "ADT, DT, Trap:              (batch, nheads, seqlen)"
         # in mamba/mamba_ssm/ops/triton/mamba3/mamba3_siso_fwd.py
