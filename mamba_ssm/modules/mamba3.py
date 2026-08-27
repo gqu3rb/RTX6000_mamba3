@@ -171,6 +171,8 @@ class Mamba3(nn.Module):
 
         if self.is_mimo:
             # Initialize up/down MIMO projection (for x and z)
+            # The description of their dimenison can be seen on:
+            # Appendix C, [Published Version] Mamba3.pdf
             mimo_x_init_weights = torch.ones(self.nheads, self.mimo_rank, self.headdim, device=device) / self.mimo_rank
             mimo_z_init_weights = torch.ones(self.nheads, self.mimo_rank, self.headdim, device=device)
             mimo_o_init_weights = torch.ones(self.nheads, self.mimo_rank, self.headdim, device=device) / self.mimo_rank
@@ -180,6 +182,9 @@ class Mamba3(nn.Module):
             self.mimo_o = nn.Parameter(mimo_o_init_weights, requires_grad=True)
     
         # D "skip" parameter
+        # This parameter is not instroduced in any versions of mamba theses,
+        # but it is mentioned in
+        # section 2.1, Efficiently Modeling Long Sequences with Structured State Spaces.pdf
         self.D = nn.Parameter(torch.ones(self.nheads, device=device))
         self.D._no_weight_decay = True
 
@@ -313,6 +318,14 @@ class Mamba3(nn.Module):
                 K_bias=self.B_bias,
                 MIMO_V=self.mimo_x,
                 MIMO_Z=self.mimo_z,
+                # MIMO_Out=self.mimo_o if (self.fuse_pregate_headwise_norm is True)
+                #                       OR (self.is_outproj_norm is False)
+                # NOTE: this condition used to be just "self.is_outproj_norm is False".
+                # Upstream commit 33e2849 "Fuse gated norm and reduce bwd memory I/O in Mamba-3 MIMO (#967)"
+                # added the fused path: when self.fuse_pregate_headwise_norm is True the output RMSNorm
+                # is computed inside the TileLang kernel instead of in Python (see the
+                # "if self.is_outproj_norm and not self.fuse_pregate_headwise_norm" block below),
+                # so the kernel needs mimo_o (and Z) to finish the whole output stage by itself.
                 MIMO_Out=self.mimo_o if (self.fuse_pregate_headwise_norm or not self.is_outproj_norm) else None,
                 Angles=angles,
                 D=self.D,
@@ -342,6 +355,9 @@ class Mamba3(nn.Module):
             y = rearrange(y, "b l h p -> b l (h p)")
         else:
             y = mamba3_siso_combined(
+                # .squeeze(dim) removed the selected dim of a tensor if the selected dim is 1
+                # C.squeeze(2) transform the dimension of C from (B L R G N) to
+                # (B L G N) if R=1
                 Q=C.squeeze(2),
                 K=B.squeeze(2),
                 V=x,
@@ -352,8 +368,11 @@ class Mamba3(nn.Module):
                 K_bias=self.B_bias.squeeze(1),
                 Angles=angles,
                 D=self.D,
+                # Z=z if self.is_outproj_norm is False
                 Z=z if not self.is_outproj_norm else None,
                 chunk_size=self.chunk_size,
+                # see the comments in the starting of `mamba3_siso_combined()`` function
+                # to know its usage
                 Input_States=None,
                 return_final_states=ssm_state is not None,
                 cu_seqlens=cu_seqlens,
