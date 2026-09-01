@@ -174,6 +174,11 @@ class Mamba3(nn.Module):
                 return out
 
         # Apply in_proj
+        # The block's own input. Not needed by the cross-branch comparison, but it is the
+        # tensor an in_proj quantizer sees, so the distribution analysis needs it. Taps
+        # added here must be mirrored on the rtx6000-adapt branch or compare.py will list
+        # them as nano-only and skip them (it warns and falls back to the intersection).
+        tap("u", u, layer=self.layer_idx)
         zxBCdtAtrap = self.in_proj(u)
         z, x, B, C, dd_dt, dd_A, trap, angles = torch.split(
             zxBCdtAtrap,
@@ -187,38 +192,42 @@ class Mamba3(nn.Module):
             dim=-1)
         # Tapped before the rearranges below transpose trap/angles, so both branches
         # record the same (b, l, h) layout. See mamba_ssm/utils/tap.py.
-        tap("dd_dt", dd_dt)
-        tap("dd_A", dd_A)
-        tap("trap_raw", trap)
-        tap("angles_raw", angles)
+        tap("dd_dt", dd_dt, layer=self.layer_idx)
+        tap("dd_A", dd_A, layer=self.layer_idx)
+        tap("trap_raw", trap, layer=self.layer_idx)
+        tap("angles_raw", angles, layer=self.layer_idx)
         z = rearrange(z, "b l (h p) -> b l h p", p=self.headdim)
         x = rearrange(x, "b l (h p) -> b l h p", p=self.headdim)
         B = rearrange(B, "b l (r g n) -> b l r g n", r=self.mimo_rank, g=self.num_bc_heads)
         C = rearrange(C, "b l (r g n) -> b l r g n", r=self.mimo_rank, g=self.num_bc_heads)
-        tap("z", z)
-        tap("x", x)
-        tap("B_raw", B)
-        tap("C_raw", C)
+        tap("z", z, layer=self.layer_idx)
+        tap("x", x, layer=self.layer_idx)
+        tap("B_raw", B, layer=self.layer_idx)
+        tap("C_raw", C, layer=self.layer_idx)
         trap = rearrange(trap, "b l h -> b h l")
 
         # Compute ADT, DT
         _A = -heavy_tail_activation(dd_A.to(torch.float32)) # (B, L, N)
         _A = torch.clamp(_A, max=-self.A_floor)            
+        # `A` was previously only tapped in _preprocess(), i.e. the single-token step path,
+        # so it never fired during a prefill-only lm-eval run.
+        tap("A", _A, layer=self.layer_idx)
         DT = F.softplus(dd_dt + self.dt_bias) # (B, L, N)
-        tap("DT", DT)   # tapped BEFORE the transpose below; rtx keeps this layout
+        tap("DT", DT, layer=self.layer_idx)
         ADT = _A * DT
+        tap("ADT", ADT, layer=self.layer_idx)
         DT = rearrange(DT, "b l n -> b n l")
         ADT = rearrange(ADT, "b l n -> b n l")
 
         # Compute angle — cast to float32 as required by the MIMO/SISO kernels
         angles = angles.unsqueeze(-2).expand(-1, -1, self.nheads, -1).to(torch.float32) # (B, L, N, S)
-        tap("angles_exp", angles)
+        tap("angles_exp", angles, layer=self.layer_idx)
 
         # Apply RMS Norm on B and C
         B = self.B_norm(B)
         C = self.C_norm(C)
-        tap("B_normed", B)
-        tap("C_normed", C)
+        tap("B_normed", B, layer=self.layer_idx)
+        tap("C_normed", C, layer=self.layer_idx)
         
         # Apply Mamba-3 kernel
         if self.is_mimo:
@@ -289,16 +298,16 @@ class Mamba3(nn.Module):
                 z = rearrange(z, "b l h p -> b l (h p)")
                 y = self.norm(y, z)
         
-        tap("y_pre_outproj", y)
+        tap("y_pre_outproj", y, layer=self.layer_idx)
         out = self.out_proj(y.to(x.dtype))
-        tap("out", out)
+        tap("out", out, layer=self.layer_idx)
         return out
     
 
     def _preprocess(self, A_proj, dd_dt, B, C, x, z, trap_proj, angle_proj):
         _A = -heavy_tail_activation(A_proj.to(torch.float32))
         _A = torch.clamp(_A, max=-self.A_floor)
-        tap("A", _A)
+        tap("A", _A, layer=self.layer_idx)
         DT = F.softplus(dd_dt + self.dt_bias)
         trap = torch.sigmoid(trap_proj)
 
