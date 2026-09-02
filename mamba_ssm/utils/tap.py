@@ -38,7 +38,7 @@ _ACC = None
 _CHANNEL_TRAILING_DIMS = {
     "z": 2, "x": 2, # setting h*p element for a channel of z, x is also applied with the same setting
     "B_raw": 3, "C_raw": 3, "B_normed": 3, "C_normed": 3,
-    "y_pre_outproj": 1, "out": 1,
+    "ssm_out": 2, "ssm_mimo_ver_out": 3, "y_pre_outproj": 1, "out": 1,
     "dd_dt": 1, "dd_A": 1, "trap_raw": 1, "angles_raw": 1,
     "DT": 1, "A": 1, "ADT": 1, "angles_exp": 1,
     "u": 1,

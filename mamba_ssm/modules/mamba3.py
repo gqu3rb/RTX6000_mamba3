@@ -3,7 +3,7 @@
 import math
 from einops import rearrange, repeat
 
-from mamba_ssm.utils.tap import tap
+from mamba_ssm.utils.tap import tap, is_active as tap_is_active
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -231,6 +231,40 @@ class Mamba3(nn.Module):
         
         # Apply Mamba-3 kernel
         if self.is_mimo:
+            if tap_is_active():
+                # this part is for testing the distribution of the output of ssm,
+                # so saving its gradients is not needed
+                with torch.no_grad(): 
+                    y_ssm = mamba3_mimo_combined(
+                        Q=C,
+                        K=B,
+                        V=x,
+                        ADT=ADT,
+                        DT=DT,
+                        Trap=trap,
+                        Q_bias=self.C_bias,
+                        K_bias=self.B_bias,
+                        MIMO_V=self.mimo_x,
+                        MIMO_Z=self.mimo_z,
+                        MIMO_Out=None, # disable the fusing of mimo output projection
+                        Angles=angles,
+                        D=self.D,
+                        Z=None, # disable fusing SiLU(z) gating
+                        chunk_size=self.chunk_size,
+                        rotary_dim_divisor=self.rotary_dim_divisor,
+                        dtype=x.dtype,
+                        # Must stay False: return_state=True makes the kernel return a
+                        # tuple (tap() would choke on it)
+                        return_state=False,
+                        cu_seqlens=cu_seqlens,
+                        # Must stay False: mamba3_mimo_fwd.py:516 raises
+                        # "fuse_pregate_headwise_rms_norm=True requires mimo_o" when
+                        # MIMO_Out is None
+                        fuse_pregate_headwise_rms_norm=False,
+                    )
+                    tap("ssm_mimo_ver_out", y_ssm, layer=self.layer_idx)
+                    del y_ssm
+
             y = mamba3_mimo_combined(
                 Q=C,
                 K=B,
