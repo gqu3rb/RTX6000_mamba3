@@ -10,6 +10,9 @@ import torch.nn.functional as F
 
 from mamba_ssm.ops.triton.layernorm_gated import RMSNorm as RMSNormGated
 
+# for B/C_rope taps
+from mamba_ssm.ops.triton.mamba3.angle_dt import angle_dt_fwd
+
 try:
     from mamba_ssm.ops.tilelang.mamba3.mamba3_mimo import mamba3_mimo as mamba3_mimo_combined
 except ImportError:
@@ -235,6 +238,36 @@ class Mamba3(nn.Module):
                 # this part is for testing the distribution of the output of ssm,
                 # so saving its gradients is not needed
                 with torch.no_grad(): 
+
+                    # the forward() in mamba3_mimo.py calls
+                    # angle_dt_fwd() to get cumulative sums before calling
+                    # mamba_mimo_forward()
+
+                    # returns (B, L, H, S)
+                    ang = angle_dt_fwd(angles, DT, chunk_size=self.chunk_size,
+                                        # Must stay False: return_state=True makes the kernel return a
+                                        # tuple (tap() would choke on it)
+                                        return_output_state=False, cu_seqlens=cu_seqlens)
+
+                    tap("angles_cumsum", ang, layer=self.layer_idx)
+                    rot  = self.d_state // self.rotary_dim_divisor   # 128 // 4 = 32 pairs
+                    half = self.d_state // 2                         # 64
+                    cos = torch.cos(ang).unsqueeze(2) # (B, L, 1, H, S)
+                    sin = torch.sin(ang).unsqueeze(2)
+                    for nm, t, bias in (("C_rope", C, self.C_bias),
+                                        ("B_rope", B, self.B_bias)):
+                        # bias is (H, R, N)
+                        # bias.permute(1, 0, 2) is (R, H, N)
+                        # v is (B, L, R, G=1, N)
+                        v = t.float() + bias.permute(1, 0, 2)        # (B, L, R, H, N)
+                        lo = v[..., :rot].clone() # (B, L, R, H, S)
+                        hi = v[..., half:half + rot].clone()
+                        v[..., :rot]            = cos * lo - sin * hi
+                        v[..., half:half + rot] = sin * lo + cos * hi
+                        tap(nm, v, layer=self.layer_idx)
+                        del v, lo, hi
+                    del ang, rot, half, cos, sin
+
                     y_ssm = mamba3_mimo_combined(
                         Q=C,
                         K=B,
