@@ -239,6 +239,12 @@ class Mamba3(nn.Module):
                 # so saving its gradients is not needed
                 with torch.no_grad(): 
 
+                    x_unsqueeze = x.unsqueeze(2) # (B, L, 1, H, P)
+                    # (B, L, 1, H, P) * (R, H, P)
+                    x_post_mimo = x_unsqueeze * self.mimo_x.permute(1, 0, 2)
+                    tap("x_post_mimo", x_post_mimo, layer=self.layer_idx)
+                    del x_unsqueeze, x_post_mimo
+
                     # the forward() in mamba3_mimo.py calls
                     # angle_dt_fwd() to get cumulative sums before calling
                     # mamba_mimo_forward()
@@ -295,7 +301,16 @@ class Mamba3(nn.Module):
                         # MIMO_Out is None
                         fuse_pregate_headwise_rms_norm=False,
                     )
+
+                    # (b l h p) -> (b l h 1 p)
+                    z_unsqueeze = z.unsqueeze(3)
+                    z_post_mimo = z_unsqueeze * self.mimo_z * 0.5
+                    z_post_silu = z_post_mimo * torch.tanh(z_post_mimo) + z_post_mimo
+
+                    tap("z_post_silu", z_post_silu, layer=self.layer_idx)
                     tap("ssm_mimo_ver_out", y_ssm, layer=self.layer_idx)
+
+                    del z_unsqueeze, z_post_mimo, z_post_silu
                     del y_ssm
 
             y = mamba3_mimo_combined(
