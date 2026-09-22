@@ -40,6 +40,9 @@ _CHANNEL_TRAILING_DIMS = {
     "B_raw": 3, "C_raw": 3, "B_normed": 3, "C_normed": 3,
     "angles_cumsum": 2, "B_rope": 3, "C_rope": 3, "x_post_mimo": 3, "z_post_silu": 3,
     "ssm_out": 2, "ssm_mimo_ver_out": 3, "y_pre_outproj": 1, "out": 1,
+    # SiLU(z) * ssm_out, i.e. the gate applied but the output projection not yet.
+    # Mamba-2 has no mimo_rank axis, so its channel is h*p against Mamba-3's r*h*p.
+    "y_ew_mult": 2, "y_mimo_ver_ew_mult": 3,
     "dd_dt": 1, "dd_A": 1, "trap_raw": 1, "angles_raw": 1,
     "DT": 1, "A": 1, "ADT": 1, "angles_exp": 1,
     "u": 1,
@@ -47,6 +50,7 @@ _CHANNEL_TRAILING_DIMS = {
     # their channel is g*n rather than Mamba-3's r*g*n.
     "xBC_preconv": 1, "xBC_postconv": 1,
     "B_prekernel": 2, "C_prekernel": 2,
+    "z_silu": 2,
 }
 
 # log2|x| histogram settings
@@ -183,6 +187,9 @@ class _Stat:
         self.sum4 = z()
         self.vmin = torch.full((), float("inf"), dtype=torch.float64, device=device)
         self.vmax = torch.full((), float("-inf"), dtype=torch.float64, device=device)
+        # Smallest NONZERO |x| seen: how small a magnitude the format has to represent
+        # before it underflows.
+        self.vabsmin_nz = torch.full((), float("inf"), dtype=torch.float64, device=device)
         # per-channel absmax
         self.ch_absmax = torch.zeros(n_channels, dtype=torch.float32, device=device)
         self.ch_sumabs = torch.zeros(n_channels, dtype=torch.float64, device=device)
@@ -212,6 +219,10 @@ class _Stat:
         self.sum4 += (f2 * f2).sum()
         self.vmin = torch.minimum(self.vmin, f64.min())
         self.vmax = torch.maximum(self.vmax, f64.max())
+        # where() rather than a[a > 0]: boolean-mask indexing has a data-dependent output
+        # shape, which forces a host sync on every tap. This stays a queued kernel.
+        self.vabsmin_nz = torch.minimum(
+            self.vabsmin_nz, torch.where(a > 0, a, float("inf")).min())
         self.ch_absmax = torch.maximum(self.ch_absmax, a.amax(dim=0).to(torch.float32))
         self.ch_sumabs += a.sum(dim=0)
         n_zero = (a == 0).sum()
@@ -270,6 +281,8 @@ class _Stat:
             "min": self.vmin.item(),
             "max": self.vmax.item(),
             "absmax": max(abs(self.vmin.item()), abs(self.vmax.item())),
+            # inf when the tap saw nothing but zeros.
+            "absmin_nonzero": self.vabsmin_nz.item(),
             "mean": mean,
             "std": math.sqrt(var),
             "mean_abs": (self.sumabs / n).item(),
