@@ -302,13 +302,18 @@ class Mamba3(nn.Module):
                         fuse_pregate_headwise_rms_norm=False,
                     )
 
-                    # (b l h p) -> (b l h 1 p)
-                    z_unsqueeze = z.unsqueeze(3)
-                    z_post_mimo = z_unsqueeze * self.mimo_z * 0.5
+                    # (b l h p) -> (b l 1 h p), so the result is (B, L, R, H, P) and
+                    # lines up axis-for-axis with y_ssm
+                    z_unsqueeze = z.unsqueeze(2)
+                    z_post_mimo = z_unsqueeze * self.mimo_z.permute(1, 0, 2) * 0.5
                     z_post_silu = z_post_mimo * torch.tanh(z_post_mimo) + z_post_mimo
 
                     tap("z_post_silu", z_post_silu, layer=self.layer_idx)
                     tap("ssm_mimo_ver_out", y_ssm, layer=self.layer_idx)
+                    #     lqk_PsiV_reshaped_frag[cs,r,p] *= phi_frag_intrachunk[r,p]
+                    #                                       * z_expanded_frag[cs,r,p]
+                    # so this product is the only place the two can be separated.
+                    tap("y_mimo_ver_ew_mult", y_ssm * z_post_silu, layer=self.layer_idx)
 
                     del z_unsqueeze, z_post_mimo, z_post_silu
                     del y_ssm
